@@ -1,14 +1,75 @@
 import socket
+import threading
 from threading import Thread
 import math
 import re
 import configparser
-
+import pyaudio
+import os
 # online_conn维护一个在线用户
 online_conn = list()
 # conn2user存储socket连接和用户的对应关系
 conn2user = dict()
 
+class Server:
+    def __init__(self):
+        # Fetching the public IP address
+        #self.ip = socket.gethostbyname(socket.gethostname())
+        #self.ip= '192.168.152.127'
+        self.ip= get_wireless_ip()
+        while True:
+            try:
+                self.port = 9808
+                self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.s.bind((self.ip, self.port))
+                break
+            except:
+                print(self.ip)
+                #print("Couldn't bind to that port")
+
+        self.connections = []
+        self.accept_connections()
+
+    def accept_connections(self):
+        self.s.listen(100)
+
+        print('Running on IP: ' + self.ip)
+        print('Running on port: ' + str(self.port))
+
+        while True:
+            c, addr = self.s.accept()
+
+            self.connections.append(c)
+
+            threading.Thread(target=self.handle_client, args=(c, addr,)).start()
+
+    def broadcast(self, sock, data):
+        for client in self.connections:
+            if client != self.s and client != sock:
+                try:
+                    client.send(data)
+                except:
+                    pass
+
+    def handle_client(self, c, addr):
+        while 1:
+            try:
+                data = c.recv(1024)
+                print(data)
+                self.broadcast(c, data)
+
+            except socket.error:
+                c.close()
+def get_wireless_ip():
+    try:
+        s= socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+
+        s.connect(('8.8.8.8',80))
+
+        ip=s.getsockname()[0]
+    finally:
+        s.close()
+    return ip
 
 # 发送带长度的字符串
 def send_string_with_length(_conn, content):
@@ -151,7 +212,8 @@ def handle_private(_conn, addr):
     send_from=conn2user[_conn]
     content3=content[content.rfind('!#'):]
     content4=content3[2:]
-    msg="来自"+send_from+"的私聊： "+content4
+    msg="与"+send_from+"的私聊： "+content4
+    msg2="与"+send_to+"的私聊： "+content4
 
     
     for client in online_conn:
@@ -161,6 +223,83 @@ def handle_private(_conn, addr):
             send_string_with_length(client, "#!message#!")
             send_string_with_length(client, conn2user[_conn])
             send_string_with_length(client, msg)
+
+    # 发送给自己（消息发送者）
+    send_string_with_length(_conn, "#!message#!")
+    send_string_with_length(_conn, send_from)  # 或者用 send_from，如果你想要发送给自己同样的消息
+    send_string_with_length(_conn, msg2)
+
+    return True
+
+#处理文件上传传输
+def handle_file_upload(_conn, addr):
+    # 接收文件名
+    file_name = _conn.recv(1024).decode('utf-8')
+    print(file_name)
+    file_path = f"file\\{file_name}"
+    print(file_path)
+    # 接收文件内容长度
+    file_size = int(_conn.recv(1024).decode('utf-8'))
+
+    # 打开文件以写入
+    with open(file_path, "wb") as file:
+        # 接收文件内容
+        received_size = 0
+        while received_size < file_size:
+            data = _conn.recv(1024)
+            if not data:
+                break
+            print(data)
+            file.write(data)
+            received_size += len(data)
+        print("get out")
+
+    # 通知客户端文件接收完成
+    _conn.sendall(b"File received")
+    print(f"File {file_name} received from {addr}")
+
+    return True
+
+# 处理文件下载传输
+def handle_file_download(_conn, file_name):
+    # 接收文件名
+    file_name = _conn.recv(1024).decode('utf-8')
+    print(file_name)
+    #文件路径
+    file_path = f"file\\{file_name}"
+    print(file_path)
+    # 检查文件是否存在
+    if not os.path.exists(file_path):
+        print("File not found")
+        _conn.sendall(b"File not found")
+        _conn.close()
+        return False
+
+    # 发送文件名
+    #_conn.sendall(file_name.encode('utf-8'))
+
+    # 获取文件大小
+    file_size = os.path.getsize(file_path)
+    print(file_size)
+    #_conn.sendall(str(file_size).encode('utf-8'))
+    print("downloading... ")
+    # 打开文件以读取
+    with open(file_path, "rb") as file:
+        # 发送文件内容
+        while True:
+            data = file.read(1024*1024*100)
+            if len(data) != 0:
+                print(data)
+                _conn.sendall(data)
+            else:
+                print("no data")
+                _conn.sendall(data)
+                break
+           # _conn.sendall(data)
+
+    # 通知客户端文件发送完成
+    #_conn.sendall(b"File sent")
+    print(f"File {file_name} sent to client")
 
     return True
 
@@ -187,6 +326,12 @@ def transaction(_conn, addr):
             elif transac_type == "5":  # 发送在线好友列表
                 print("handle_private")
                 result = handle_private(_conn, addr)
+            elif transac_type == "6":
+                print("handle_file_upload")
+                result = handle_file_upload(_conn, addr)
+            elif transac_type == "7":
+                print("handle_file_download")
+                result = handle_file_download(_conn, addr)
             if not result:
                 break
     except Exception as e:
@@ -199,6 +344,11 @@ def transaction(_conn, addr):
             handle_online_list(_conn, addr)
         except:
             print(str(addr) + " Connection closing error")
+
+def phone_function():
+    server = Server()
+
+my_thread = threading.Thread(target=phone_function)
 
 
 # main
@@ -213,13 +363,21 @@ if __name__ == "__main__":
 
         sk = socket.socket()
         sk.bind((val, 8080))
-    
+
+        file_sk = socket.socket()
+        file_sk.bind((val, 8081))
+
+        my_thread.start()
+
         # 最大挂起客户数
         sk.listen(10)
+        file_sk.listen(10)
         print("server set up, listening...")
         while True:
             conn, addr = sk.accept()
+            conn1, addr1 = file_sk.accept()
             #交给线程处理
             Thread(target=transaction, args=(conn, addr)).start()
+            Thread(target=transaction, args=(conn1, addr1)).start()
     except Exception as e:
         print("exception throwed: " + str(e))
